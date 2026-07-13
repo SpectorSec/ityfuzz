@@ -808,33 +808,42 @@ pub fn evm_main(mut args: EvmArgs) {
     let mut proxy_deploy_codes: Vec<String> = vec![];
 
     if args.fetch_tx_data {
-        let response = reqwest::blocking::get(args.proxy_address).unwrap().text().unwrap();
-        let data: Vec<Data> = serde_json::from_str(&response).unwrap();
-
-        for d in data {
-            if d.body.method != "eth_sendRawTransaction" {
-                continue;
+        match reqwest::blocking::get(&args.proxy_address).and_then(|r| r.text()) {
+            Ok(response) => {
+                match serde_json::from_str::<Vec<Data>>(&response) {
+                    Ok(data) => {
+                        for d in data {
+                            if d.body.method != "eth_sendRawTransaction" {
+                                continue;
+                            }
+                            let tx = match d.body.params {
+                                Some(v) => v,
+                                None => continue,
+                            };
+                            let params: Vec<String> = match serde_json::from_value(tx) {
+                                Ok(p) => p,
+                                Err(e) => { warn!("--fetch-tx-data: failed to parse tx params: {}", e); continue; }
+                            };
+                            if params.is_empty() { continue; }
+                            let data = params[0].trim_start_matches("0x");
+                            let bytes_data = match hex::decode(data) {
+                                Ok(b) => b,
+                                Err(e) => { warn!("--fetch-tx-data: hex decode failed: {}", e); continue; }
+                            };
+                            let transaction: Transaction = match rlp::decode(&bytes_data) {
+                                Ok(t) => t,
+                                Err(e) => { warn!("--fetch-tx-data: RLP decode failed: {}", e); continue; }
+                            };
+                            proxy_deploy_codes.push(hex::encode(transaction.input));
+                        }
+                    }
+                    Err(e) => warn!("--fetch-tx-data: failed to parse proxy response as JSON: {}", e),
+                }
             }
-
-            let tx = d.body.params.unwrap();
-
-            let params: Vec<String> = serde_json::from_value(tx).unwrap();
-
-            let data = params[0].clone();
-
-            let data = if let Some(stripped) = data.strip_prefix("0x") {
-                stripped
-            } else {
-                &data
-            };
-
-            let bytes_data = hex::decode(data).unwrap();
-
-            let transaction: Transaction = rlp::decode(&bytes_data).unwrap();
-
-            let code = hex::encode(transaction.input);
-
-            proxy_deploy_codes.push(code);
+            Err(e) => warn!(
+                "--fetch-tx-data: could not reach proxy at {} ({}). Continuing without constructor args — start the proxy server or remove --fetch-tx-data.",
+                args.proxy_address, e
+            ),
         }
     }
 
