@@ -463,6 +463,10 @@ pub fn evm_fuzzer(
     evm_executor.host.initialize(state);
     evm_executor.host.initial_block_timestamp = Some(artifacts.initial_env.block.timestamp);
 
+    if let Some(ref path) = config.state_file {
+        crate::evm::state_loader::load_snapshot(&mut evm_executor.host, path);
+    }
+
     // Feature 014 Phase 0: populate oracle_selectors from known ABI interfaces.
     for (addr, abis) in &artifacts.address_to_abi_object {
         let selectors: Vec<[u8; 4]> = abis

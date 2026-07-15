@@ -32,6 +32,7 @@ pub mod types;
 pub mod utils;
 pub mod vm;
 pub mod guidance;
+pub mod state_loader;
 
 use std::{
     cell::RefCell,
@@ -421,6 +422,12 @@ pub struct EvmArgs {
     #[arg(long, default_value = "")]
     guidance_file: String,
 
+    /// Path to a pre-fetched state snapshot JSON (Architecture A offline fuzzing).
+    /// Produced by 11_snapshot_state.py — loads storage, balances, and bytecodes
+    /// directly into REVM, eliminating RPC calls during fuzzing.
+    #[arg(long)]
+    state_file: Option<String>,
+
     /// Command to build the contract. If specified, will use this command to
     /// build contracts instead of using bins and abis.
     #[arg()]
@@ -477,6 +484,7 @@ impl fmt::Display for EvmArgs {
         write!(f, "    preset_file_path: {},\n", self.preset_file_path)?;
         write!(f, "    base_directory: {},\n", self.base_directory)?;
         write!(f, "    guidance_file: {},\n", self.guidance_file)?;
+        write!(f, "    state_file: {:?},\n", self.state_file)?;
         write!(f, "    build_command: {:?},\n", self.build_command)?;
         write!(f, "}}")
     }
@@ -1038,6 +1046,7 @@ pub fn evm_main(mut args: EvmArgs) {
         empty_state_guard: args.empty_state_guard,
         dos_detection: args.dos_detection,
         guidance_file: args.guidance_file.clone(),
+        state_file: args.state_file.clone(),
         etherscan_api_key,
     };
 
@@ -1261,6 +1270,7 @@ fn test_evm_offchain_setup() {
         empty_state_guard: args.empty_state_guard,
         dos_detection: args.dos_detection,
         guidance_file: args.guidance_file.clone(),
+        state_file: args.state_file.clone(),
         etherscan_api_key: String::from(""),
     };
 
