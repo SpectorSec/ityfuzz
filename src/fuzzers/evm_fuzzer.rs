@@ -525,9 +525,35 @@ pub fn evm_fuzzer(
             crate::evm::types::CampaignIntermediateStatesEVM::register();
         }
         let instance_map = state.metadata_map().get::<ABIAddressToInstanceMap>().cloned();
+
+        // Extract guidance kill-chain prime selectors: functions that reach a drain sink.
+        // These expand the candidate pool beyond the 6-entry hardcoded PRIME_SELECTORS list
+        // so the guidance dictionary drives discovery for any target, not just known archetypes.
+        let guidance_prime_sels: Vec<[u8; 4]> = {
+            let mut sels: Vec<[u8; 4]> = state
+                .metadata_map()
+                .get::<crate::evm::guidance::GuidanceMetadata>()
+                .map(|g| {
+                    g.guidance.functions.values()
+                        .filter(|f| !f.kill_chains.chains.is_empty())
+                        .filter_map(|f| f.selector.as_deref())
+                        .filter_map(|s| hex::decode(s.trim_start_matches("0x")).ok())
+                        .filter(|b| b.len() == 4)
+                        .map(|b| [b[0], b[1], b[2], b[3]])
+                        .collect()
+                })
+                .unwrap_or_default();
+            sels.sort();
+            sels.dedup();
+            sels
+        };
+        if !guidance_prime_sels.is_empty() {
+            info!("[guidance] {} kill-chain prime selectors extracted for campaign discovery", guidance_prime_sels.len());
+        }
+
         let cache = instance_map
-            .map(|m| CampaignTargetCache::new_with_preset(&m, Vec::new(), &preset_chain_selectors, None))
-            .unwrap_or_else(|| CampaignTargetCache::new_with_preset(&ABIAddressToInstanceMap::default(), Vec::new(), &preset_chain_selectors, None));
+            .map(|m| CampaignTargetCache::new_with_preset(&m, Vec::new(), &preset_chain_selectors, None, &guidance_prime_sels))
+            .unwrap_or_else(|| CampaignTargetCache::new_with_preset(&ABIAddressToInstanceMap::default(), Vec::new(), &preset_chain_selectors, None, &guidance_prime_sels));
         // [pool-tel] one-shot: how many (contract,selector) entries per selector in the
         // campaign candidate pool. Exposes contract-multiplicity bias (e.g. approve on
         // every ERC20 → over-weighted in uniform (contract,selector) sampling).

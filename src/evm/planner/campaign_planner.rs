@@ -230,7 +230,7 @@ impl CampaignTargetCache {
         abi_map: &ABIAddressToInstanceMap,
         borrowable_tokens: Vec<EVMAddress>,
     ) -> Self {
-        Self::new_with_preset(abi_map, borrowable_tokens, &[], None)
+        Self::new_with_preset(abi_map, borrowable_tokens, &[], None, &[])
     }
 
     /// Candidate-based target discovery. When `preset_selectors` is non-empty
@@ -242,11 +242,18 @@ impl CampaignTargetCache {
     /// hardcoded PRIME/EXPLOIT_SELECTORS. This removes the hidden
     /// candidate-bias at discovery: the same "candidates, not a fixed
     /// prior" principle the preset system already uses.
+    ///
+    /// `guidance_prime_extra` — selectors extracted from guidance kill-chain
+    /// entries (functions that reach a drain sink). Unioned with PRIME_SELECTORS
+    /// in the fallback branch so the guidance dictionary drives discovery instead
+    /// of the 6-entry hardcoded list. Ignored when preset_selectors is non-empty
+    /// (preset already supplies the full candidate vocabulary).
     pub fn new_with_preset(
         abi_map: &ABIAddressToInstanceMap,
         borrowable_tokens: Vec<EVMAddress>,
         preset_selectors: &[[u8; 4]],
         _contract_families: Option<()>,
+        guidance_prime_extra: &[[u8; 4]],
     ) -> Self {
         let (prime_sels, exploit_sels): (&[[u8; 4]], &[[u8; 4]]) = if !preset_selectors.is_empty() {
             // Every matched-exploit selector is a candidate for both ends of the chain;
@@ -255,6 +262,21 @@ impl CampaignTargetCache {
         } else {
             (PRIME_SELECTORS, EXPLOIT_SELECTORS)
         };
+
+        // In the fallback branch, union guidance-derived primes with the hardcoded list
+        // so the kill-chain dictionary drives discovery, not just a 6-entry constant.
+        let combined_primes: Vec<[u8; 4]>;
+        let prime_sels = if preset_selectors.is_empty() && !guidance_prime_extra.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            combined_primes = prime_sels.iter().chain(guidance_prime_extra.iter())
+                .filter(|s| seen.insert(**s))
+                .copied()
+                .collect();
+            &combined_primes[..]
+        } else {
+            prime_sels
+        };
+
         let mut prime_targets = find_targets_by_selector(abi_map, prime_sels);
         let mut exploit_targets = find_targets_by_selector(abi_map, exploit_sels);
         let mut reflexive_targets = find_targets_by_selector(abi_map, REFLEXIVE_LEVER_SELECTORS);
@@ -1547,6 +1569,7 @@ mod tests {
             Vec::new(),
             &[borrow_sel, withdraw_sel, unrelated_sel],
             None,
+            &[],
         );
 
         // Construct mock guidance: after "Target:borrow" -> ["Target:withdraw"]
