@@ -1636,6 +1636,122 @@ mod tests {
     }
 }
 
+/// Parse a guidance `kill_chains[*].path` string into public function names.
+/// Input:  "deposit -> _deposit >>> _deposit -> _transfer -> withdraw"
+/// Output: ["deposit", "withdraw"] — internals (_prefix) stripped, deduplicated.
+fn parse_kill_chain_path(path: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for hop in path.split(" -> ").flat_map(|s| s.split(" >>> ")) {
+        let hop = hop.trim();
+        if hop.is_empty() || hop.starts_with('_') || hop == "constructor" {
+            continue;
+        }
+        if seen.insert(hop.to_string()) {
+            result.push(hop.to_string());
+        }
+    }
+    result
+}
+
+/// N-step kill-chain path planner. Samples a guidance kill chain whose path
+/// resolves to >= 2 deployed hops and returns a `CampaignSequence` that
+/// follows the exact N-step route. Falls back gracefully when no chain matches
+/// the deployed ABI vocabulary (returns `None` → caller falls through to the
+/// 2-step planner). The borrow step and temporal warp are applied with the
+/// same rules as `plan_campaign_sampled`.
+pub fn plan_from_kill_chain_path<R: Rand>(
+    cache: &CampaignTargetCache,
+    abi_map: &ABIAddressToInstanceMap,
+    guidance_meta: &GuidanceMetadata,
+    temporal_skimming: bool,
+    rand: &mut R,
+) -> Option<CampaignSequence> {
+    // Build short-name → selector map from guidance (keys are "Contract:fn").
+    let mut name_to_sel: HashMap<String, [u8; 4]> = HashMap::new();
+    for (key, func) in &guidance_meta.guidance.functions {
+        if let Some(sel_str) = func.selector.as_deref() {
+            if let Ok(bytes) = hex::decode(sel_str.trim_start_matches("0x")) {
+                if bytes.len() == 4 {
+                    let short = key.split(':').last().unwrap_or(key.as_str());
+                    name_to_sel.entry(short.to_string()).or_insert([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                }
+            }
+        }
+    }
+
+    // Collect viable (path, prime_sel) pairs: path non-empty AND at least the
+    // first public hop in the path resolves to a deployed selector. This keeps
+    // the viable set tight without requiring every hop to be present.
+    let mut viable: Vec<(String, [u8; 4])> = Vec::new();
+    for func in guidance_meta.guidance.functions.values() {
+        let sel_str = match func.selector.as_deref() { Some(s) => s, None => continue };
+        let bytes = match hex::decode(sel_str.trim_start_matches("0x")) {
+            Ok(b) if b.len() == 4 => b,
+            _ => continue,
+        };
+        let prime_sel = [bytes[0], bytes[1], bytes[2], bytes[3]];
+        let deployed = abi_map.map.values()
+            .any(|abis| abis.iter().any(|a| a.function == prime_sel));
+        if !deployed { continue; }
+        for chain in &func.kill_chains.chains {
+            if !chain.path.is_empty() {
+                viable.push((chain.path.clone(), prime_sel));
+            }
+        }
+    }
+
+    if viable.is_empty() { return None; }
+
+    // Shuffle-sample: try up to 8 chains to find one that resolves >= 2 hops.
+    let tries = viable.len().min(8);
+    for _ in 0..tries {
+        let vi = sample_idx(viable.len(), rand)?;
+        let (path, _) = &viable[vi];
+        let hops = parse_kill_chain_path(path);
+        if hops.len() < 2 { continue; }
+
+        let mut steps: Vec<ConciseEVMInput> = Vec::new();
+        if let Some(tok) = cache.borrowable_tokens.first() {
+            steps.push(build_borrow_step(*tok));
+        }
+
+        let mut resolved = 0usize;
+        for hop in &hops {
+            let sel = match name_to_sel.get(hop.as_str()) { Some(s) => *s, None => continue };
+            let matches: Vec<(EVMAddress, BoxedABI)> = abi_map.map.iter()
+                .flat_map(|(addr, abis)| {
+                    abis.iter()
+                        .filter(|a| a.function == sel)
+                        .map(move |a| (*addr, a.clone()))
+                })
+                .collect();
+            if let Some(idx) = sample_idx(matches.len(), rand) {
+                let (addr, abi) = matches[idx].clone();
+                steps.push(build_abi_step(addr, Some(abi)));
+                resolved += 1;
+            }
+        }
+
+        if resolved < 2 || steps.len() < 2 { continue; }
+
+        let mut warps = Vec::new();
+        if temporal_skimming {
+            warps.push((steps.len() - 1, 10u64));
+        }
+
+        return Some(CampaignSequence {
+            steps,
+            linkages: Vec::new(),
+            warps,
+            promoted: Vec::new(),
+            aposteriori: false,
+        });
+    }
+
+    None
+}
+
 fn build_abi_step(target: EVMAddress, abi: Option<BoxedABI>) -> ConciseEVMInput {
     // Pin the concrete function (`abi`) so the step calls it directly — required
     // for the executor's controlled warp probe to exercise the time-gated

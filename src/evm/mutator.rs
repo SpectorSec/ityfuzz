@@ -28,7 +28,7 @@ use crate::{
         input::EVMInputTy::Borrow,
         middlewares::cheatcode::CHEATCODE_ADDRESS,
         oracles::{TrustedCallerMetadata, WhaleAddressMetadata},
-        planner::{plan_campaign_sampled, CampaignTargetCache, PromotionCandidate, PromotionCandidates},
+        planner::{plan_campaign_sampled, plan_from_kill_chain_path, CampaignTargetCache, PromotionCandidate, PromotionCandidates},
         types::{convert_u256_to_h160, EVMAddress, EVMU256},
         vm::{Constraint, EVMState, EVMStateT},
     },
@@ -1342,18 +1342,38 @@ where
                     };
                     let guidance_meta = state.metadata_map()
                         .get::<crate::evm::guidance::GuidanceMetadata>();
-                    if let Some(campaign) = plan_campaign_sampled(
-                        cache,
-                        guidance_meta,
-                        self.temporal_skimming,
-                        self.reflexive_lever,
-                        self.dimension_warp && timestamp_located,
-                        structural_pin,
-                        value_lever_pin,
-                        borrow_authority,
-                        divergence_value,
-                        &mut plan_rand,
-                    ) {
+                    // Try N-step kill-chain path planning first: uses guidance
+                    // kill_chains[*].path to build a multi-hop CampaignSequence
+                    // instead of the 2-step (prime→exploit) fallback. Falls
+                    // through to plan_campaign_sampled when no path resolves.
+                    let guided_campaign = guidance_meta.and_then(|g_meta| {
+                        state.metadata_map()
+                            .get::<ABIAddressToInstanceMap>()
+                            .and_then(|am| {
+                                plan_from_kill_chain_path(
+                                    cache,
+                                    am,
+                                    g_meta,
+                                    self.temporal_skimming,
+                                    &mut plan_rand,
+                                )
+                            })
+                    });
+                    let campaign_candidate = guided_campaign.or_else(|| {
+                        plan_campaign_sampled(
+                            cache,
+                            guidance_meta,
+                            self.temporal_skimming,
+                            self.reflexive_lever,
+                            self.dimension_warp && timestamp_located,
+                            structural_pin,
+                            value_lever_pin,
+                            borrow_authority,
+                            divergence_value,
+                            &mut plan_rand,
+                        )
+                    });
+                    if let Some(campaign) = campaign_candidate {
                         // Telemetry: the multi-step CHAIN the fuzzer assembled — does it
                         // sequence the exploit selectors (add_liquidity -> remove_imbalance ->
                         // deposit/withdraw) into a real sentence, or just isolated words? This
